@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import numpy as np
 import torch
+from Parameters import RL_N_STATES_CSI
 from copy import deepcopy
 from DebugPrint import *
 from Parameters import (

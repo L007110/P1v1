@@ -285,23 +285,27 @@ def rl():
             f"Epoch {epoch}: Cumulative reward {cumulative_reward_per_epoch}, Loss {loss_list_per_epoch}"
         )
 
-        # 参数同步部分（保持不变）
+        # 参数同步
         if epoch % SYNC_FREQUENCY == 0:
-            # 计算全局平均参数
-            global_params = {}
-            for dqn in global_dqn_list:
-                for name, param in dqn.named_parameters():
-                    if name in global_params:
-                        global_params[name] += param.data
-                    else:
-                        global_params[name] = param.data
+            try:
+                # 计算全局平均参数
+                global_params = {}
+                for dqn in global_dqn_list:
+                    for name, param in dqn.named_parameters():
+                        if name in global_params:
+                            global_params[name] += param.data.clone()
+                        else:
+                            global_params[name] = param.data.clone()
 
-            for name in global_params:
-                global_params[name] /= len(global_dqn_list)
+                for name in global_params:
+                    global_params[name] /= len(global_dqn_list)
 
-            for dqn in global_dqn_list:
-                for name, param in dqn.named_parameters():
-                    param.data.copy_(global_params[name])
+                for dqn in global_dqn_list:
+                    for name, param in dqn.named_parameters():
+                        if name in global_params:
+                            param.data.copy_(global_params[name])
+            except Exception as e:
+                debug(f"Parameter sync error: {e}")
 
         # 判断收敛条件（保持不变）
         if len(loss_list_per_epoch) > 0:

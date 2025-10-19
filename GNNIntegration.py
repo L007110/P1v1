@@ -4,7 +4,7 @@ import torch.nn as nn
 from DebugPrint import *
 from GraphBuilder import global_graph_builder
 from GNNModel import global_gnn_model, GNNDQN
-
+from Parameters import USE_GNN_ENHANCEMENT
 
 class GNNIntegrationManager:
 
@@ -46,14 +46,13 @@ class GNNIntegrationManager:
             return None
 
     def get_gnn_enhanced_q_values(self, graph_data, dqn_id=None):
-        # 获取GNN增强的Q值
         if not self.use_gnn or graph_data is None:
             return None
 
         try:
             device = next(self.gnn_model.parameters()).device
 
-            # 确保图数据在正确设备上
+            # 确保所有数据都在正确设备上
             graph_data['node_features']['features'] = graph_data['node_features']['features'].to(device)
             graph_data['node_features']['types'] = graph_data['node_features']['types'].to(device)
 

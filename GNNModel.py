@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch_geometric.nn import GATConv, global_mean_pool
 from DebugPrint import *
 from Parameters import *
-
+from AttentionMechanism import TemporalAttention
 
 class EnhancedHeteroGNN(nn.Module):
     """
@@ -314,7 +314,7 @@ class GNNDQN(nn.Module):
 
 
 # 全局GNN模型实例
-global_gnn_model = HeteroGNN(
+global_gnn_model = EnhancedHeteroGNN(
     node_feature_dim=7,  # 与GraphBuilder输出一致
     hidden_dim=64,
     num_heads=4,
