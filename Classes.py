@@ -64,6 +64,11 @@ class DQN(torch.nn.Module):
         self.gnn_enhanced = False  # 是否使用GNN增强
         self.graph_features = None  # 图特征缓存
 
+        self.vehicle_in_dqn_range_by_distance = []  # 在GraphBuilder.py中使用
+        self.delay_list = []  # 在Main.py中使用
+        self.snr_list = []  # 在Main.py中使用
+        self.vehicle_count_list = []  # 在Main.py中使用
+
     def update_csi_states(self, vehicles, is_current=True):
         if USE_UMI_NLOS_MODEL:
             from NewRewardCalculator import new_reward_calculator

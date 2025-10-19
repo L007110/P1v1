@@ -119,6 +119,13 @@ VEHICLE_SPEED_KMH = 60
 VEHICLE_SPEED_M3S = VEHICLE_SPEED_KMH * 1000 * 3 / 3600
 SYNC_FREQUENCY = 10
 
+# 添加缺失的通信参数
+GAIN_ANTENNA_T = 1.0  # 发射天线增益
+GAIN_ANTENNA_b = 1.0  # 接收天线增益
+BANDWIDTH = 10e6  # 带宽
+SPEED_C = 3e8  # 光速
+SIGNAL_FREQUENCY = 28e9  # 信号频率
+CARRIER_FREQUENCY = 28e9  # 载波频率
 
 # ==================== 原有通信参数 ====================
 # 以下参数将被新的UMi NLOS模型替代
