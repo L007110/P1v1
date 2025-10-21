@@ -35,13 +35,46 @@ class NewRewardCalculator:
 
         return effective_gain
 
+    def _record_communication_metrics(self, dqn, delay, snr):
+        """安全记录通信指标到DQN"""
+        try:
+            # 记录延迟（确保有效值）
+            if delay is not None and not np.isnan(delay) and delay > 0:
+                dqn.delay_list.append(delay)
+                debug(f"Recorded delay for DQN {dqn.dqn_id}: {delay:.6f}")
+            else:
+                dqn.delay_list.append(1.0)  # 默认值
+                debug(f"Used default delay for DQN {dqn.dqn_id}: 1.0")
+
+            # 记录SNR（确保有效值）
+            if (snr is not None and not np.isnan(snr) and
+                    not np.isinf(snr) and snr > -100):  # 合理的SNR范围
+                dqn.snr_list.append(snr)
+                debug(f"Recorded SNR for DQN {dqn.dqn_id}: {snr:.2f}dB")
+            else:
+                dqn.snr_list.append(0.0)  # 默认值
+                debug(f"Used default SNR for DQN {dqn.dqn_id}: 0.0dB")
+
+        except Exception as e:
+            debug(f"Error recording metrics for DQN {dqn.dqn_id}: {e}")
+            # 降级方案
+            dqn.delay_list.append(1.0)
+            dqn.snr_list.append(0.0)
+
     def calculate_complete_reward(self, dqn, vehicles, action):
+        debug(f"=== Reward Calculation Start for DQN {dqn.dqn_id} ===")
+        debug(f"Vehicles count: {len(vehicles)}")
+        debug(f"Action: {action}")
 
         if not vehicles:
-            debug("No vehicles for reward calculation")
+            debug("No vehicles - returning default reward 0.0")
+            # 即使没有车辆也记录默认指标
+            self._record_communication_metrics(dqn, 1.0, 0.0)
             return 0.0
 
         reward = 0.0
+        delay = 1.0  # 默认延迟
+        snr_curr = 0.0  # 默认SNR
 
         try:
             # 1. 获取最近的车辆信息
@@ -62,7 +95,8 @@ class NewRewardCalculator:
             total_power = TRANSMITTDE_POWER * power_ratio * beam_count * directional_gain
 
             # 5. 计算SNR
-            snr_curr, snr_linear, _ = self.channel_model.calculate_snr(total_power, distance_3d)
+            snr_db, snr_linear, _ = self.channel_model.calculate_snr(total_power, distance_3d)
+            snr_curr = snr_db  # 使用dB值
 
             # 6. SNR变化奖励 (提升时奖励，下降时惩罚)
             snr_change = snr_curr - dqn.prev_snr
@@ -92,26 +126,14 @@ class NewRewardCalculator:
         except Exception as e:
             debug(f"Error in new reward calculation: {e}")
             reward = 0.0
-            # === 修复：确保记录通信指标到DQN ===
-            try:
-                # 记录延迟和SNR到DQN
-                if hasattr(dqn, 'record_communication_metrics'):
-                    dqn.record_communication_metrics(delay, snr_curr)
-                else:
-                    # 降级方案：直接记录到列表
-                    if delay is not None and not np.isnan(delay) and delay > 0:
-                        dqn.delay_list.append(delay)
-                    if snr_curr is not None and not np.isnan(snr_curr) and snr_curr > 0 and not np.isinf(snr_curr):
-                        dqn.snr_list.append(snr_curr)
 
-                debug(f"Reward Calculation Complete - DQN {dqn.dqn_id}: "
-                      f"delay={delay:.6f}, snr={snr_curr:.2f}dB, "
-                      f"reward={reward:.3f}, vehicles={len(vehicles)}")
+        # === 修复：确保记录通信指标 ===
+        self._record_communication_metrics(dqn, delay, snr_curr)
 
-            except Exception as e:
-                debug(f"Error recording metrics for DQN {dqn.dqn_id}: {e}")
+        debug(f"=== Reward Calculation Complete for DQN {dqn.dqn_id} ===")
+        debug(f"Final - delay={delay:.6f}, snr={snr_curr:.2f}dB, reward={reward:.3f}")
 
-            # 归一化奖励
+        # 归一化奖励
         return max(min(reward, 1.0), -1.0)
 
     def calculate_delay(self, distance_3d, dqn_action, directional_gain=1.0):

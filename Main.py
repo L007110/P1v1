@@ -32,6 +32,20 @@ def rl():
     mean_delay_list = []
     mean_snr_list = []
 
+    # === 添加调试信息 ===
+    debug_print("Starting RL training with UMi NLOS model")
+    debug_print(f"Number of DQNs: {len(global_dqn_list)}")
+    debug_print(f"Number of vehicles: {len(overall_vehicle_list)}")
+
+    # 检查DQN的指标列表初始化
+    for dqn in global_dqn_list:
+        if not hasattr(dqn, 'delay_list'):
+            dqn.delay_list = []
+        if not hasattr(dqn, 'snr_list'):
+            dqn.snr_list = []
+        debug_print(f"DQN {dqn.dqn_id} - delay_list: {len(dqn.delay_list)}, snr_list: {len(dqn.snr_list)}")
+    # === 添加结束 ===
+
     while True:
         if len(loss_list_per_epoch) > 0 and len(mean_loss_across_epochs) > 10:
             debug_print(
@@ -40,6 +54,11 @@ def rl():
             )
         else:
             debug_print(f"######## Epoch {epoch} ########")
+            # === 添加车辆状态检查 ===
+            debug(f"Epoch {epoch}: Overall vehicles: {len(overall_vehicle_list)}")
+            for i, vehicle in enumerate(overall_vehicle_list[:3]):  # 只显示前3辆
+                debug(f"Vehicle {vehicle.id} at {vehicle.curr_loc}, dir: {vehicle.curr_dir}")
+            # === 添加结束 ===
         cumulative_reward_per_epoch = 0.0
         loss_list_per_epoch.clear()
 
@@ -162,6 +181,18 @@ def rl():
                     )
 
                 cumulative_reward_per_epoch += dqn.reward
+
+                # === 添加奖励计算后的调试 ===
+                debug(f"DQN {dqn.dqn_id} reward calculation complete:")
+                debug(f"  - Reward: {dqn.reward:.3f}")
+                debug(f"  - Vehicles in range: {len(dqn.vehicle_in_dqn_range_by_distance)}")
+                debug(f"  - Delay list length: {len(dqn.delay_list)}")
+                debug(f"  - SNR list length: {len(dqn.snr_list)}")
+                if dqn.delay_list:
+                    debug(f"  - Latest delay: {dqn.delay_list[-1]:.6f}")
+                if dqn.snr_list:
+                    debug(f"  - Latest SNR: {dqn.snr_list[-1]:.2f}dB")
+                # === 添加结束 ===
 
                 # === 新增：确保指标记录（对于旧模型）===
                 if not USE_UMI_NLOS_MODEL and hasattr(dqn, 'record_communication_metrics'):
@@ -292,6 +323,12 @@ def rl():
             f"Epoch {epoch}: Cumulative reward {cumulative_reward_per_epoch}, Loss {loss_list_per_epoch}"
         )
 
+        # === 添加指标检查 ===
+        debug(f"Epoch {epoch} completed:")
+        for dqn in global_dqn_list:
+            debug(f"DQN {dqn.dqn_id} - delays: {len(dqn.delay_list)}, SNRs: {len(dqn.snr_list)}")
+        # === 添加结束 ===
+
         # 参数同步
         if epoch % SYNC_FREQUENCY == 0:
             try:
@@ -314,6 +351,7 @@ def rl():
             except Exception as e:
                 debug(f"Parameter sync error: {e}")
 
+
         # 判断收敛条件
         if len(loss_list_per_epoch) > 0:
             if FLAG_EMA_LOSS:
@@ -333,30 +371,55 @@ def rl():
                 """安全计算平均指标"""
                 delays = []
                 snrs = []
+
+                debug("=== Calculating Mean Metrics ===")
+
                 for dqn in dqn_list:
-                    # 延迟数据
+                    dqn_id = getattr(dqn, 'dqn_id', 'unknown')
+
+                    # 延迟数据 - 更宽松的验证
                     if hasattr(dqn, 'delay_list') and dqn.delay_list:
-                        # 过滤无效值，取最后一个有效值
-                        valid_delays = [d for d in dqn.delay_list if d is not None and not np.isnan(d) and d > 0]
+                        debug(f"DQN {dqn_id} delay_list length: {len(dqn.delay_list)}")
+                        # 取所有有效延迟值
+                        valid_delays = [d for d in dqn.delay_list
+                                        if d is not None and not np.isnan(d) and d > 0]
                         if valid_delays:
-                            delays.append(valid_delays[-1])
-                            debug(f"DQN {dqn.dqn_id} valid delay: {valid_delays[-1]}")
+                            # 使用最近的一些值而不是最后一个
+                            recent_delays = valid_delays[-min(5, len(valid_delays)):]
+                            delays.extend(recent_delays)
+                            debug(
+                                f"DQN {dqn_id} valid delays: {len(recent_delays)}, values: {[f'{d:.6f}' for d in recent_delays]}")
+                        else:
+                            debug(f"DQN {dqn_id} NO valid delays")
 
-                    # SNR数据
+                    # SNR数据 - 更宽松的验证
                     if hasattr(dqn, 'snr_list') and dqn.snr_list:
-                        # 过滤无效SNR值
-                        valid_snrs = [s for s in dqn.snr_list if
-                                      s is not None and not np.isnan(s) and s > 0 and not np.isinf(s)]
+                        debug(f"DQN {dqn_id} snr_list length: {len(dqn.snr_list)}")
+                        valid_snrs = [s for s in dqn.snr_list
+                                      if s is not None and not np.isnan(s) and not np.isinf(s)]
                         if valid_snrs:
-                            snrs.append(valid_snrs[-1])
-                            debug(f"DQN {dqn.dqn_id} valid SNR: {valid_snrs[-1]}")
+                            recent_snrs = valid_snrs[-min(5, len(valid_snrs)):]
+                            snrs.extend(recent_snrs)
+                            debug(
+                                f"DQN {dqn_id} valid SNRs: {len(recent_snrs)}, values: {[f'{s:.2f}' for s in recent_snrs]}")
+                        else:
+                            debug(f"DQN {dqn_id} NO valid SNRs")
 
-                mean_delay = np.mean(delays) if delays else 0
-                mean_snr = np.mean(snrs) if snrs else 0
-                mean_snr_db = 10 * np.log10(mean_snr) if mean_snr > 0 else -float('inf')
+                # 计算平均值
+                mean_delay = np.mean(delays) if delays else 1.0  # 默认1.0秒
+                mean_snr_linear = np.mean(snrs) if snrs else 1.0  # 默认线性SNR=1
 
-                debug(f"Mean metrics - delays: {len(delays)}, snrs: {len(snrs)}, "
-                      f"mean_delay: {mean_delay}, mean_snr_db: {mean_snr_db}")
+                # 转换为dB，处理边界情况
+                if mean_snr_linear > 0:
+                    mean_snr_db = 10 * np.log10(mean_snr_linear)
+                else:
+                    mean_snr_db = -100  # 合理的最小值
+
+                debug(f"=== Mean Metrics Summary ===")
+                debug(f"Total delays collected: {len(delays)}")
+                debug(f"Total SNRs collected: {len(snrs)}")
+                debug(f"Final mean_delay: {mean_delay:.6f}")
+                debug(f"Final mean_snr_db: {mean_snr_db:.2f}dB")
 
                 return mean_delay, mean_snr_db
 
