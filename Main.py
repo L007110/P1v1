@@ -163,6 +163,13 @@ def rl():
 
                 cumulative_reward_per_epoch += dqn.reward
 
+                # === 新增：确保指标记录（对于旧模型）===
+                if not USE_UMI_NLOS_MODEL and hasattr(dqn, 'record_communication_metrics'):
+                    try:
+                        dqn.record_communication_metrics(delay, snr_curr)
+                    except Exception as e:
+                        debug(f"Failed to record communication metrics for DQN {getattr(dqn, 'dqn_id', 'unknown')}: {e}")
+
         debug(f"***********************************************")
         debug(f"*        Next State, Target Q and Loss        *")
         debug(f"***********************************************")
@@ -307,7 +314,7 @@ def rl():
             except Exception as e:
                 debug(f"Parameter sync error: {e}")
 
-        # 判断收敛条件（保持不变）
+        # 判断收敛条件
         if len(loss_list_per_epoch) > 0:
             if FLAG_EMA_LOSS:
                 EMA_WEIGHT = 0.2
@@ -321,12 +328,41 @@ def rl():
                 mean_loss = np.mean(loss_list_per_epoch)
             mean_loss_across_epochs.append(mean_loss)
 
-            # 计算平均延迟和SNR
-            mean_delay = np.mean([dqn.delay_list[-1] for dqn in global_dqn_list if dqn.delay_list])
+            # === 修复：安全计算平均延迟和SNR ===
+            def calculate_mean_metrics(dqn_list):
+                """安全计算平均指标"""
+                delays = []
+                snrs = []
+                for dqn in dqn_list:
+                    # 延迟数据
+                    if hasattr(dqn, 'delay_list') and dqn.delay_list:
+                        # 过滤无效值，取最后一个有效值
+                        valid_delays = [d for d in dqn.delay_list if d is not None and not np.isnan(d) and d > 0]
+                        if valid_delays:
+                            delays.append(valid_delays[-1])
+                            debug(f"DQN {dqn.dqn_id} valid delay: {valid_delays[-1]}")
+
+                    # SNR数据
+                    if hasattr(dqn, 'snr_list') and dqn.snr_list:
+                        # 过滤无效SNR值
+                        valid_snrs = [s for s in dqn.snr_list if
+                                      s is not None and not np.isnan(s) and s > 0 and not np.isinf(s)]
+                        if valid_snrs:
+                            snrs.append(valid_snrs[-1])
+                            debug(f"DQN {dqn.dqn_id} valid SNR: {valid_snrs[-1]}")
+
+                mean_delay = np.mean(delays) if delays else 0
+                mean_snr = np.mean(snrs) if snrs else 0
+                mean_snr_db = 10 * np.log10(mean_snr) if mean_snr > 0 else -float('inf')
+
+                debug(f"Mean metrics - delays: {len(delays)}, snrs: {len(snrs)}, "
+                      f"mean_delay: {mean_delay}, mean_snr_db: {mean_snr_db}")
+
+                return mean_delay, mean_snr_db
+
+            mean_delay, mean_snr_db = calculate_mean_metrics(global_dqn_list)
             mean_delay_list.append(mean_delay)
-            mean_snr = np.mean([dqn.snr_list[-1] for dqn in global_dqn_list if dqn.snr_list])
-            mean_snr_dB = 10 * np.log10(mean_snr) if mean_snr > 0 else -float('inf')
-            mean_snr_list.append(mean_snr_dB)
+            mean_snr_list.append(mean_snr_db)
 
             if epoch == 1500:
                 debug_print(

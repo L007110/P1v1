@@ -69,6 +69,12 @@ class DQN(torch.nn.Module):
         self.snr_list = []  # 在Main.py中使用
         self.vehicle_count_list = []  # 在Main.py中使用
 
+        # === 修复：确保指标列表正确初始化 ===
+        self.delay_list = []  # 延迟列表
+        self.snr_list = []  # SNR列表
+        self.vehicle_count_list = []  # 车辆计数列表
+        self.loss_list = []  # 损失列表
+
     def update_csi_states(self, vehicles, is_current=True):
         if USE_UMI_NLOS_MODEL:
             from NewRewardCalculator import new_reward_calculator
@@ -365,3 +371,19 @@ class Vehicle:
         )  # 基于速度计算的下一步位置
 
         debug(f"Vehicle {self.id} moved from {curr_loc_for_debug} to {self.curr_loc}")
+
+    def record_communication_metrics(self, delay, snr):
+        """
+        安全记录通信指标
+        """
+        if delay is not None and not np.isnan(delay) and delay > 0:
+            self.delay_list.append(delay)
+            debug(f"DQN {self.dqn_id} recorded delay: {delay}")
+        else:
+            debug(f"DQN {self.dqn_id} invalid delay: {delay}")
+
+        if snr is not None and not np.isnan(snr) and snr > 0 and not np.isinf(snr):
+            self.snr_list.append(snr)
+            debug(f"DQN {self.dqn_id} recorded SNR: {snr}")
+        else:
+            debug(f"DQN {self.dqn_id} invalid SNR: {snr}")
