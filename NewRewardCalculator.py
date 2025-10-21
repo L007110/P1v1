@@ -92,6 +92,24 @@ class NewRewardCalculator:
         except Exception as e:
             debug(f"Error in new reward calculation: {e}")
             reward = 0.0
+            # === 修复：确保记录通信指标到DQN ===
+            try:
+                # 记录延迟和SNR到DQN
+                if hasattr(dqn, 'record_communication_metrics'):
+                    dqn.record_communication_metrics(delay, snr_curr)
+                else:
+                    # 降级方案：直接记录到列表
+                    if delay is not None and not np.isnan(delay) and delay > 0:
+                        dqn.delay_list.append(delay)
+                    if snr_curr is not None and not np.isnan(snr_curr) and snr_curr > 0 and not np.isinf(snr_curr):
+                        dqn.snr_list.append(snr_curr)
+
+                debug(f"Reward Calculation Complete - DQN {dqn.dqn_id}: "
+                      f"delay={delay:.6f}, snr={snr_curr:.2f}dB, "
+                      f"reward={reward:.3f}, vehicles={len(vehicles)}")
+
+            except Exception as e:
+                debug(f"Error recording metrics for DQN {dqn.dqn_id}: {e}")
 
             # 归一化奖励
         return max(min(reward, 1.0), -1.0)
