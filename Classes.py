@@ -3,77 +3,58 @@ import numpy as np
 import torch
 from Parameters import RL_N_STATES_CSI
 from copy import deepcopy
-from DebugPrint import *
+from logger import debug, debug_print
 from Parameters import (
-    RL_ALPHA,
-    RL_EPSILON,
-    SCENE_SCALE_X,
-    SCENE_SCALE_Y,
-    VEHICLE_SPEED_M3S,
-    CROSS_POSITION_LIST,
-    DIRECTION_H_LEFT,
-    DIRECTION_H_STEADY,
-    DIRECTION_H_RIGHT,
-    DIRECTION_V_UP,
-    DIRECTION_V_STEADY,
-    DIRECTION_V_DOWN, USE_UMI_NLOS_MODEL,
+    RL_ALPHA, RL_EPSILON, SCENE_SCALE_X, SCENE_SCALE_Y, VEHICLE_SPEED_M3S,
+    CROSS_POSITION_LIST, DIRECTION_H_LEFT, DIRECTION_H_STEADY, DIRECTION_H_RIGHT,
+    DIRECTION_V_UP, DIRECTION_V_STEADY, DIRECTION_V_DOWN, USE_UMI_NLOS_MODEL,
 )
 
-
-# 定义DQN
 class DQN(torch.nn.Module):
-    def __init__(
-        self, n_states, n_hidden, n_actions, dqn_id, start_x, start_y, end_x, end_y
-    ):
+    def __init__(self, n_states, n_hidden, n_actions, dqn_id, start_x, start_y, end_x, end_y):
         super(DQN, self).__init__()
         self.ln = torch.nn.LayerNorm(n_states)
         self.fc1 = torch.nn.Linear(n_states, n_hidden)
         self.fc2 = torch.nn.Linear(n_hidden, n_actions)
 
         self.dqn_id = dqn_id
-        self.start = (start_x, start_y)  # 起点
-        self.end = (end_x, end_y)  # 终点
+        self.start = (start_x, start_y)
+        self.end = (end_x, end_y)
+        self.bs_loc = (min(start_x, end_x) + abs(start_x - end_x) / 2,
+                       min(start_y, end_y) + abs(start_y - end_y) / 2)
 
-        self.bs_loc = (
-            min(start_x, end_x) + abs(start_x - end_x) / 2,
-            min(start_y, end_y) + abs(start_y - end_y) / 2,
-        )  # 基站位置在每条道路的中心
-
-        self.vehicle_exist_curr = False  # 用于标记道路是否有车
-        self.vehicle_exist_next = False  # 用于标记道路是否有车
-        self.curr_state = []  # 当前状态
-        self.next_state = []  # 下个状态
-        self.action = None  # 动作
-        self.reward = 0.0  # 奖励
-        self.q_estimate = 0.0  # Q估计值
-        self.q_target = 0.0  # Q目标值
-        self.loss = 0.0  # 损失值
-        self.loss_list = []  # 损失值列表
-        self.epsilon = RL_EPSILON  # 贪婪度
-        self.prev_loss = 0.0  # 上一次的损失值
-        self.prev_snr = 0.0  # 上一次的信噪比
+        self.vehicle_exist_curr = False
+        self.vehicle_exist_next = False
+        self.curr_state = []
+        self.next_state = []
+        self.action = None
+        self.reward = 0.0
+        self.q_estimate = 0.0
+        self.q_target = 0.0
+        self.loss = 0.0
+        self.loss_list = []
+        self.epsilon = RL_EPSILON
+        self.prev_loss = 0.0
+        self.prev_snr = 0.0
+        self.prev_delay = 0.0  # 新增：记录上一次延迟
 
         self.optimizer = torch.optim.Adam(self.parameters(), lr=RL_ALPHA)
 
-        # === CSI状态管理 ===
-        self.csi_states_curr = []  # 当前CSI状态
-        self.csi_states_next = []  # 下一时刻CSI状态
-        self.csi_states_history = []  # CSI历史记录
+        # CSI状态管理
+        self.csi_states_curr = []
+        self.csi_states_next = []
+        self.csi_states_history = []
 
-        # === GNN相关属性 ===
-        self.gnn_enhanced = False  # 是否使用GNN增强
-        self.graph_features = None  # 图特征缓存
+        # GNN相关属性
+        self.gnn_enhanced = False
+        self.graph_features = None
 
-        self.vehicle_in_dqn_range_by_distance = []  # 在GraphBuilder.py中使用
-        self.delay_list = []  # 在Main.py中使用
-        self.snr_list = []  # 在Main.py中使用
-        self.vehicle_count_list = []  # 在Main.py中使用
+        self.vehicle_in_dqn_range_by_distance = []
+        self.delay_list = []
+        self.snr_list = []
+        self.vehicle_count_list = []
 
-        # === 修复：确保指标列表正确初始化 ===
-        self.delay_list = []  # 延迟列表
-        self.snr_list = []  # SNR列表
-        self.vehicle_count_list = []  # 车辆计数列表
-        self.loss_list = []  # 损失列表
+        debug(f"DQN {self.dqn_id} created from {self.start} to {self.end}")
 
     def update_csi_states(self, vehicles, is_current=True):
         if USE_UMI_NLOS_MODEL:
@@ -114,22 +95,23 @@ class DQN(torch.nn.Module):
 
 class Vehicle:
     def __init__(self, index, x, y, horizontal, vertical):
-        self.first_occur = True  # 标记是否是第一次出现
-
+        self.first_occur = True
         self.id = index
-        self.curr_loc = (x, y)  # 当前位置
-        self.curr_dir = (horizontal, vertical)  # 当前方向
+        self.curr_loc = (x, y)
+        self.curr_dir = (horizontal, vertical)
 
-        debug(
-            f"Vehicle {self.id} created at {self.curr_loc} with direction {self.curr_dir}"
-        )
+        debug(f"Vehicle {self.id} created at {self.curr_loc} with direction {self.curr_dir}")
 
         self.next_loc = (
             self.curr_loc[0] + self.curr_dir[0] * VEHICLE_SPEED_M3S,
             self.curr_loc[1] + self.curr_dir[1] * VEHICLE_SPEED_M3S,
-        )  # 下一步位置
-
-        self.distance_to_bs = None  # 车辆到基站的距离
+        )
+        self.distance_to_bs = None
+        self.communication_metrics = {
+            'snr_history': [],
+            'delay_history': [],
+            'throughput_history': []
+        }
 
     def move(self):
         self.first_occur = False
@@ -372,18 +354,17 @@ class Vehicle:
 
         debug(f"Vehicle {self.id} moved from {curr_loc_for_debug} to {self.curr_loc}")
 
-    def record_communication_metrics(self, delay, snr):
-        """
-        安全记录通信指标
-        """
+    def record_communication_metrics(self, delay, snr, throughput=None):
+        """安全记录通信指标"""
         if delay is not None and not np.isnan(delay) and delay > 0:
-            self.delay_list.append(delay)
-            debug(f"DQN {self.dqn_id} recorded delay: {delay}")
+            self.communication_metrics['delay_history'].append(delay)
         else:
-            debug(f"DQN {self.dqn_id} invalid delay: {delay}")
+            self.communication_metrics['delay_history'].append(1.0)
 
         if snr is not None and not np.isnan(snr) and snr > 0 and not np.isinf(snr):
-            self.snr_list.append(snr)
-            debug(f"DQN {self.dqn_id} recorded SNR: {snr}")
+            self.communication_metrics['snr_history'].append(snr)
         else:
-            debug(f"DQN {self.dqn_id} invalid SNR: {snr}")
+            self.communication_metrics['snr_history'].append(0.0)
+
+        if throughput:
+            self.communication_metrics['throughput_history'].append(throughput)

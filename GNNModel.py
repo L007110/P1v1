@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATConv, global_mean_pool
-from DebugPrint import *
+from logger import debug, debug_print
 from Parameters import *
 from AttentionMechanism import TemporalAttention
 

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from DebugPrint import *
+from logger import debug, debug_print
 import numpy as np
 from Parameters import TRANSMITTDE_POWER
 

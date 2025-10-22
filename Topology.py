@@ -21,7 +21,7 @@ from Parameters import (
     ANTENNA_HEIGHT_BS,
 )
 from Classes import DQN, Vehicle
-from DebugPrint import *
+from logger import debug, debug_print
 
 
 def formulate_global_list_dqn(dqn_list, device):

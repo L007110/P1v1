@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import numpy as np
 from ChannelModel import global_channel_model
-from DebugPrint import *
+from logger import debug, debug_print
 from Parameters import *
 
 

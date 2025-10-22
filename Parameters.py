@@ -2,7 +2,7 @@
 import torch
 import numpy as np
 import itertools
-from DebugPrint import *
+from logger import debug, debug_print
 
 # 全局列表
 global_dqn_list = []

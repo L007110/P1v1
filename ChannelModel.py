@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import numpy as np
 import torch
-from DebugPrint import *
+from logger import debug, debug_print
 
 
 class UMiNLOSChannel:
@@ -29,7 +29,7 @@ class UMiNLOSChannel:
         # 计算噪声功率
         self.noise_power = self._calculate_noise_power()
 
-        # debug("UMiNLOSChannel initialized with 28GHz UMi NLOS model")
+        debug("UMiNLOSChannel initialized with 28GHz UMi NLOS model")
 
     def _calculate_noise_power(self):
         """计算噪声功率"""

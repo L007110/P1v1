@@ -1,7 +1,7 @@
 # GNNIntegration.py
 import torch
 import torch.nn as nn
-from DebugPrint import *
+from logger import debug, debug_print
 from GraphBuilder import global_graph_builder
 from GNNModel import global_gnn_model, GNNDQN
 from Parameters import USE_GNN_ENHANCEMENT

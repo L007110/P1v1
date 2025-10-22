@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 import numpy as np
-from DebugPrint import *
+from logger import debug, debug_print
 from Parameters import ATTENTION_HEADS
 
 class MultiHeadAttention(nn.Module):

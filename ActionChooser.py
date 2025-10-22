@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import numpy as np
 import torch
-from DebugPrint import *
+from logger import debug, debug_print
 
 
 def choose_action(dqn, action_space, device):
