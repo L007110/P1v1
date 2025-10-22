@@ -2,40 +2,209 @@
 import numpy as np
 import torch
 from ActionChooser import choose_action
-from DebugPrint import *
+from logger import global_logger, debug_print, debug, set_debug_mode
 from Parameters import *
 from Topology import formulate_global_list_dqn, vehicle_movement
+from Parameters import USE_PRIORITY_REPLAY, PER_BATCH_SIZE
 
 # === 新增：根据标志位选择奖励计算模块 ===
 if USE_UMI_NLOS_MODEL:
     from NewRewardCalculator import new_reward_calculator
 
-    debug("Main.py: Using NewRewardCalculator with UMi NLOS model")
+    debug_print("Main.py: Using NewRewardCalculator with UMi NLOS model")
 else:
     from RewardCalculator import reward_calculator, delay_calculator, calculate_snr
 
-    debug("Main.py: Using original RewardCalculator")
+    debug_print("Main.py: Using original RewardCalculator")
+
+
+def calculate_mean_metrics(dqn_list):
+    """安全计算平均指标"""
+    delays = []
+    snrs = []
+
+    debug("=== Calculating Mean Metrics ===")
+
+    for dqn in dqn_list:
+        dqn_id = getattr(dqn, 'dqn_id', 'unknown')
+
+        # 延迟数据 - 更宽松的验证
+        if hasattr(dqn, 'delay_list') and dqn.delay_list:
+            debug(f"DQN {dqn_id} delay_list length: {len(dqn.delay_list)}")
+            # 取所有有效延迟值
+            valid_delays = [d for d in dqn.delay_list
+                            if d is not None and not np.isnan(d) and d > 0]
+            if valid_delays:
+                # 使用最近的一些值而不是最后一个
+                recent_delays = valid_delays[-min(5, len(valid_delays)):]
+                delays.extend(recent_delays)
+                debug(f"DQN {dqn_id} valid delays: {len(recent_delays)}")
+            else:
+                debug(f"DQN {dqn_id} NO valid delays")
+
+        # SNR数据 - 更宽松的验证
+        if hasattr(dqn, 'snr_list') and dqn.snr_list:
+            debug(f"DQN {dqn_id} snr_list length: {len(dqn.snr_list)}")
+            valid_snrs = [s for s in dqn.snr_list
+                          if s is not None and not np.isnan(s) and not np.isinf(s)]
+            if valid_snrs:
+                recent_snrs = valid_snrs[-min(5, len(valid_snrs)):]
+                snrs.extend(recent_snrs)
+                debug(f"DQN {dqn_id} valid SNRs: {len(recent_snrs)}")
+            else:
+                debug(f"DQN {dqn_id} NO valid SNRs")
+
+    # 计算平均值
+    mean_delay = np.mean(delays) if delays else 1.0  # 默认1.0秒
+    mean_snr_linear = np.mean(snrs) if snrs else 1.0  # 默认线性SNR=1
+
+    # 转换为dB，处理边界情况
+    if mean_snr_linear > 0:
+        mean_snr_db = 10 * np.log10(mean_snr_linear)
+    else:
+        mean_snr_db = -100  # 合理的最小值
+
+    debug(f"=== Mean Metrics Summary ===")
+    debug(f"Total delays collected: {len(delays)}")
+    debug(f"Total SNRs collected: {len(snrs)}")
+    debug(f"Final mean_delay: {mean_delay:.6f}")
+    debug(f"Final mean_snr_db: {mean_snr_db:.2f}dB")
+
+    return mean_delay, mean_snr_db
+
+
+def initialize_enhanced_training():
+    """
+    初始化增强训练组件
+    """
+    from PriorityReplayBuffer import initialize_global_per
+    from Parameters import USE_PRIORITY_REPLAY, PER_CAPACITY
+
+    if USE_PRIORITY_REPLAY:
+        global_per_buffer = initialize_global_per(PER_CAPACITY)
+        from logger import debug_print
+        debug_print("Priority Experience Replay initialized")
+        return global_per_buffer
+    else:
+        from logger import debug_print
+        debug_print("Using standard experience replay")
+        return None
+
+
+def enhanced_training_step(dqn, per_buffer, device):
+    """
+    PER增强训练步骤
+    """
+    try:
+        # 从PER缓冲区采样
+        batch, indices, weights = per_buffer.sample(PER_BATCH_SIZE)
+
+        if batch is None:
+            # 回退到传统训练
+            traditional_training_step(dqn, device)
+            return
+
+        # 转换批次数据
+        states = torch.FloatTensor([exp.state for exp in batch]).to(device)
+        actions = torch.LongTensor([exp.action for exp in batch]).to(device)
+        rewards = torch.FloatTensor([exp.reward for exp in batch]).to(device)
+        next_states = torch.FloatTensor([exp.next_state for exp in batch]).to(device)
+        weights = torch.FloatTensor(weights).to(device)
+
+        # 双头DQN前向传播
+        current_q_values = dqn(states)  # [batch_size, num_actions]
+        next_q_values = dqn(next_states)  # [batch_size, num_actions]
+
+        # 计算目标Q值
+        target_q_values = rewards + RL_GAMMA * torch.max(next_q_values, dim=1)[0]  # [batch_size]
+
+        # 计算当前动作的Q值
+        current_action_q_values = current_q_values.gather(1, actions.unsqueeze(1)).squeeze(1)  # [batch_size]
+
+        # 计算TD误差（用于优先级更新）
+        td_errors = (target_q_values - current_action_q_values).abs().detach().cpu().numpy()
+
+        # 计算损失（应用重要性采样权重）
+        dqn.loss = (weights * (current_action_q_values - target_q_values.detach()) ** 2).mean()
+
+        # 更新PER优先级
+        per_buffer.update_priorities(indices, td_errors)
+
+        # 反向传播
+        dqn.optimizer.zero_grad()
+        dqn.loss.backward()
+        torch.nn.utils.clip_grad_norm_(dqn.parameters(), max_norm=1.0)
+        dqn.optimizer.step()
+
+        debug(f"Enhanced training - DQN {dqn.dqn_id}: Loss {dqn.loss.item():.4f}")
+
+    except Exception as e:
+        debug(f"Error in enhanced training step: {e}")
+        # 降级到传统训练
+        traditional_training_step(dqn, device)
+
+
+def traditional_training_step(dqn, device):
+    """
+    传统训练步骤（保持原有逻辑）
+    """
+    try:
+        # 确保状态是正确格式
+        curr_state_tensor = torch.tensor(dqn.curr_state).float().to(device)
+        next_state_tensor = torch.tensor(dqn.next_state).float().to(device)
+
+        # 如果状态是1D，添加批次维度
+        if curr_state_tensor.dim() == 1:
+            curr_state_tensor = curr_state_tensor.unsqueeze(0)
+            next_state_tensor = next_state_tensor.unsqueeze(0)
+
+        # 计算目标Q值和损失
+        next_q_values = dqn(next_state_tensor)
+        # 如果输出是2D，取最大值
+        if next_q_values.dim() == 2:
+            max_next_q = torch.max(next_q_values, dim=1)[0]
+        else:
+            max_next_q = next_q_values.max()
+
+        dqn.q_target = dqn.reward + RL_GAMMA * max_next_q
+
+        # 计算当前Q估计
+        curr_q_values = dqn(curr_state_tensor)
+        if curr_q_values.dim() == 2 and curr_q_values.size(0) == 1:
+            curr_q_values = curr_q_values.squeeze(0)
+
+        action_index = RL_ACTION_SPACE.index(dqn.action) if dqn.action in RL_ACTION_SPACE else 0
+        if curr_q_values.dim() == 1:
+            dqn.q_estimate = curr_q_values[action_index]
+        else:
+            dqn.q_estimate = curr_q_values[0, action_index]
+
+        dqn.loss = torch.nn.MSELoss()(dqn.q_estimate, dqn.q_target)
+
+        # 反向传播
+        dqn.optimizer.zero_grad()
+        dqn.loss.backward()
+        dqn.optimizer.step()
+
+    except Exception as e:
+        debug(f"Error in traditional training step: {e}")
+        # 设置默认损失值
+        dqn.loss = torch.tensor(1.0, requires_grad=True)
 
 
 def rl():
+    """
+    增强的RL训练循环（集成双头DQN和PER）
+    """
     epoch = 1
     global_vehicle_id = 0
     overall_vehicle_list = []
-    global_vehicle_id, overall_vehicle_list = vehicle_movement(
-        global_vehicle_id, overall_vehicle_list
-    )
 
-    loss_list_per_epoch = []
-    mean_loss = 0.0
-    prev_mean_loss = 0.0
-    mean_loss_across_epochs = []
-    mean_delay_list = []
-    mean_snr_list = []
+    # 初始化增强组件
+    global_per_buffer = initialize_enhanced_training()
 
-    # === 添加调试信息 ===
-    debug_print("Starting RL training with UMi NLOS model")
-    debug_print(f"Number of DQNs: {len(global_dqn_list)}")
-    debug_print(f"Number of vehicles: {len(overall_vehicle_list)}")
+    from logger import debug_print
+    debug_print("Starting enhanced RL training with Dueling DQN and PER")
 
     # 检查DQN的指标列表初始化
     for dqn in global_dqn_list:
@@ -43,296 +212,200 @@ def rl():
             dqn.delay_list = []
         if not hasattr(dqn, 'snr_list'):
             dqn.snr_list = []
-        debug_print(f"DQN {dqn.dqn_id} - delay_list: {len(dqn.delay_list)}, snr_list: {len(dqn.snr_list)}")
-    # === 添加结束 ===
 
     while True:
+        # === 修复：在循环开始时进行车辆移动 ===
+        global_vehicle_id, overall_vehicle_list = vehicle_movement(global_vehicle_id, overall_vehicle_list)
+
+        loss_list_per_epoch = []
+        mean_loss = 0.0
+        prev_mean_loss = 0.0
+        cumulative_reward_per_epoch = 0.0
+
         if len(loss_list_per_epoch) > 0 and len(mean_loss_across_epochs) > 10:
             debug_print(
-                f"######## Epoch {epoch} Prev mean loss {mean_loss} "
-                f"Vehicle count {len(overall_vehicle_list)} ######## {mean_loss_across_epochs[-10:]}"
+                f"Epoch {epoch} Prev mean loss {mean_loss} "
+                f"Vehicle count {len(overall_vehicle_list)}"
             )
         else:
-            debug_print(f"######## Epoch {epoch} ########")
-            # === 添加车辆状态检查 ===
-            debug(f"Epoch {epoch}: Overall vehicles: {len(overall_vehicle_list)}")
-            for i, vehicle in enumerate(overall_vehicle_list[:3]):  # 只显示前3辆
-                debug(f"Vehicle {vehicle.id} at {vehicle.curr_loc}, dir: {vehicle.curr_dir}")
-            # === 添加结束 ===
-        cumulative_reward_per_epoch = 0.0
-        loss_list_per_epoch.clear()
-
-        debug(f"*************************************************************")
-        debug(f"*        Current State, Action, Estimate Q and Reward        *")
-        debug(f"*************************************************************")
-        debug(f"Vehicle count: {len(overall_vehicle_list)}")
+            debug_print(f"Epoch {epoch}")
 
         # 遍历DQN列表
         for dqn in global_dqn_list:
             dqn.vehicle_exist_curr = False
             dqn.curr_state = [0 for _ in range(RL_N_STATES)]
 
-            # 遍历车辆列表, 计算到基站的距离, 并按距离从近到远排序
+            # 检测当前范围内的车辆
             dqn.vehicle_in_dqn_range_by_distance = []
             for vehicle in overall_vehicle_list:
-                if (
-                        dqn.start[0] <= vehicle.curr_loc[0] <= dqn.end[0]
-                        and dqn.start[1] <= vehicle.curr_loc[1] <= dqn.end[1]
-                ):
+                if (dqn.start[0] <= vehicle.curr_loc[0] <= dqn.end[0] and
+                        dqn.start[1] <= vehicle.curr_loc[1] <= dqn.end[1]):
                     dqn.vehicle_exist_curr = True
 
-                    # === 修改：根据信道模型选择距离计算方法 ===
                     if USE_UMI_NLOS_MODEL:
                         vehicle.distance_to_bs = new_reward_calculator.channel_model.calculate_3d_distance(
                             (dqn.bs_loc[0], dqn.bs_loc[1]), vehicle.curr_loc)
                     else:
                         vehicle.distance_to_bs = np.sqrt(
-                            (vehicle.curr_loc[0] - dqn.bs_loc[0]) ** 2
-                            + (vehicle.curr_loc[1] - dqn.bs_loc[1]) ** 2
-                            + BASE_STATION_HEIGHT ** 2
+                            (vehicle.curr_loc[0] - dqn.bs_loc[0]) ** 2 +
+                            (vehicle.curr_loc[1] - dqn.bs_loc[1]) ** 2 +
+                            BASE_STATION_HEIGHT ** 2
                         )
 
                     dqn.vehicle_in_dqn_range_by_distance.append(vehicle)
-                    distance_v_bs = vehicle.distance_to_bs
 
-            # 按距离从近到远排序
-            dqn.vehicle_in_dqn_range_by_distance.sort(
-                key=lambda x: x.distance_to_bs, reverse=False
-            )
-            debug(
-                f"Vehicle in DQN {dqn.dqn_id} range by distance: {len(dqn.vehicle_in_dqn_range_by_distance)}"
-            )
+            dqn.vehicle_in_dqn_range_by_distance.sort(key=lambda x: x.distance_to_bs, reverse=False)
 
             if dqn.vehicle_exist_curr:
                 # 形成当前状态
                 iState = 0
-                for iVehicle in range(
-                        min(RL_N_STATES // 4, len(dqn.vehicle_in_dqn_range_by_distance))
-                ):
-                    dqn.curr_state[iState] = dqn.vehicle_in_dqn_range_by_distance[
-                        iVehicle
-                    ].curr_loc[0]
-                    dqn.curr_state[iState + 1] = dqn.vehicle_in_dqn_range_by_distance[
-                        iVehicle
-                    ].curr_loc[1]
-                    dqn.curr_state[iState + 2] = dqn.vehicle_in_dqn_range_by_distance[
-                        iVehicle
-                    ].curr_dir[0]
-                    dqn.curr_state[iState + 3] = dqn.vehicle_in_dqn_range_by_distance[
-                        iVehicle
-                    ].curr_dir[1]
+                for iVehicle in range(min(RL_N_STATES // 4, len(dqn.vehicle_in_dqn_range_by_distance))):
+                    dqn.curr_state[iState] = dqn.vehicle_in_dqn_range_by_distance[iVehicle].curr_loc[0]
+                    dqn.curr_state[iState + 1] = dqn.vehicle_in_dqn_range_by_distance[iVehicle].curr_loc[1]
+                    dqn.curr_state[iState + 2] = dqn.vehicle_in_dqn_range_by_distance[iVehicle].curr_dir[0]
+                    dqn.curr_state[iState + 3] = dqn.vehicle_in_dqn_range_by_distance[iVehicle].curr_dir[1]
                     iState += 4
-                debug(f"Current state of DQN {dqn.dqn_id}: {dqn.curr_state}")
 
-                # === 新增：如果使用新模型，更新CSI状态 ===
+                # CSI状态更新
                 if USE_UMI_NLOS_MODEL and hasattr(dqn, 'update_csi_states'):
                     dqn.update_csi_states(dqn.vehicle_in_dqn_range_by_distance, is_current=True)
-                    # 将CSI状态合并到当前状态中
-                    if hasattr(dqn, 'csi_states_curr'):
-                        csi_start_idx = min(RL_N_STATES_BASE, len(dqn.curr_state))
-                        csi_end_idx = csi_start_idx + min(RL_N_STATES_CSI, len(dqn.csi_states_curr))
-                        for i, csi_val in enumerate(dqn.csi_states_curr):
-                            if csi_start_idx + i < RL_N_STATES:
-                                dqn.curr_state[csi_start_idx + i] = csi_val
 
                 # 选择动作
                 choose_action(dqn, RL_ACTION_SPACE, device)
-                debug(
-                    f"DQN {dqn.dqn_id}: Action {dqn.action}, Estimate Q {dqn.q_estimate} with type {type(dqn.q_estimate)}"
-                )
 
-                # === 修改：根据标志位选择奖励计算方式 ===
+                # 奖励计算
                 if USE_UMI_NLOS_MODEL:
-                    # 使用新奖励计算器
                     dqn.reward = new_reward_calculator.calculate_complete_reward(
                         dqn, dqn.vehicle_in_dqn_range_by_distance, dqn.action)
                 else:
-                    # 使用原有奖励计算方式
-                    delay = delay_calculator(
-                        GAIN_ANTENNA_T,
-                        distance_v_bs,
-                        BANDWIDTH,
-                        TRANSMITTDE_POWER,
-                        dqn,
-                    )
+                    # 原有奖励计算逻辑
+                    distance_v_bs = dqn.vehicle_in_dqn_range_by_distance[
+                        0].distance_to_bs if dqn.vehicle_in_dqn_range_by_distance else 0
+                    delay = delay_calculator(GAIN_ANTENNA_T, distance_v_bs, BANDWIDTH, TRANSMITTDE_POWER, dqn)
                     dqn.delay_list.append(delay)
-
-                    snr_curr, snr_bef = calculate_snr(
-                        TRANSMITTDE_POWER,
-                        GAIN_ANTENNA_T,
-                        distance_v_bs,
-                        SPEED_C,
-                        SIGNAL_FREQUENCY,
-                        dqn,
-                        dqn.vehicle_in_dqn_range_by_distance,
-                        CARRIER_FREQUENCY,
-                        GAIN_ANTENNA_b,
-                    )
+                    snr_curr, snr_bef = calculate_snr(TRANSMITTDE_POWER, GAIN_ANTENNA_T, distance_v_bs,
+                                                      SPEED_C, SIGNAL_FREQUENCY, dqn,
+                                                      dqn.vehicle_in_dqn_range_by_distance,
+                                                      CARRIER_FREQUENCY, GAIN_ANTENNA_b)
                     dqn.snr_list.append(snr_curr)
-
-                    dqn.reward = reward_calculator(
-                        dqn.action,
-                        dqn.vehicle_in_dqn_range_by_distance,
-                        snr_curr,
-                        snr_bef,
-                        overall_vehicle_list,
-                        distance_v_bs,
-                        delay,
-                    )
+                    dqn.reward = reward_calculator(dqn.action, dqn.vehicle_in_dqn_range_by_distance,
+                                                   snr_curr, snr_bef, overall_vehicle_list,
+                                                   distance_v_bs, delay)
 
                 cumulative_reward_per_epoch += dqn.reward
 
-                # === 添加奖励计算后的调试 ===
-                debug(f"DQN {dqn.dqn_id} reward calculation complete:")
-                debug(f"  - Reward: {dqn.reward:.3f}")
-                debug(f"  - Vehicles in range: {len(dqn.vehicle_in_dqn_range_by_distance)}")
-                debug(f"  - Delay list length: {len(dqn.delay_list)}")
-                debug(f"  - SNR list length: {len(dqn.snr_list)}")
-                if dqn.delay_list:
-                    debug(f"  - Latest delay: {dqn.delay_list[-1]:.6f}")
-                if dqn.snr_list:
-                    debug(f"  - Latest SNR: {dqn.snr_list[-1]:.2f}dB")
-                # === 添加结束 ===
-
-                # === 新增：确保指标记录（对于旧模型）===
-                if not USE_UMI_NLOS_MODEL and hasattr(dqn, 'record_communication_metrics'):
-                    try:
-                        dqn.record_communication_metrics(delay, snr_curr)
-                    except Exception as e:
-                        debug(f"Failed to record communication metrics for DQN {getattr(dqn, 'dqn_id', 'unknown')}: {e}")
-
-        debug(f"***********************************************")
-        debug(f"*        Next State, Target Q and Loss        *")
-        debug(f"***********************************************")
-
-        global_vehicle_id, overall_vehicle_list = vehicle_movement(
-            global_vehicle_id, overall_vehicle_list
-        )
-        debug(f"{len(overall_vehicle_list)} remain after movement")
-
-        # 计算当前DQN下的车辆数量
-        vehicle_count = 0
-        for dqn in global_dqn_list:
-            vehicle_count = len(dqn.vehicle_in_dqn_range_by_distance)
-            dqn.vehicle_count_list.append(vehicle_count)
-
-        # 遍历DQN列表
+        # === 修复：在这里进行下一状态的计算和训练 ===
         for dqn in global_dqn_list:
             dqn.vehicle_exist_next = False
             dqn.next_state = [0 for _ in range(RL_N_STATES)]
-
-            # 遍历车辆列表, 计算到基站的距离, 并按距离从近到远排序
             dqn.vehicle_in_dqn_range_by_distance = []
-            for vehicle in overall_vehicle_list:
-                if (
-                        dqn.start[0] <= vehicle.curr_loc[0] <= dqn.end[0]
-                        and dqn.start[1] <= vehicle.curr_loc[1] <= dqn.end[1]
-                ):
-                    dqn.vehicle_exist_next = True
-                    debug(f"DQN {dqn.dqn_id} vehicle exist!")
 
-                    # === 修改：根据信道模型选择距离计算方法 ===
+            for vehicle in overall_vehicle_list:
+                if (dqn.start[0] <= vehicle.curr_loc[0] <= dqn.end[0] and
+                        dqn.start[1] <= vehicle.curr_loc[1] <= dqn.end[1]):
+                    dqn.vehicle_exist_next = True
                     if USE_UMI_NLOS_MODEL:
                         vehicle.distance_to_bs = new_reward_calculator.channel_model.calculate_3d_distance(
                             (dqn.bs_loc[0], dqn.bs_loc[1]), vehicle.curr_loc)
                     else:
                         vehicle.distance_to_bs = np.sqrt(
-                            (vehicle.curr_loc[0] - dqn.bs_loc[0]) ** 2
-                            + (vehicle.curr_loc[1] - dqn.bs_loc[1]) ** 2
-                            + BASE_STATION_HEIGHT ** 2
+                            (vehicle.curr_loc[0] - dqn.bs_loc[0]) ** 2 +
+                            (vehicle.curr_loc[1] - dqn.bs_loc[1]) ** 2 +
+                            BASE_STATION_HEIGHT ** 2
                         )
-
                     dqn.vehicle_in_dqn_range_by_distance.append(vehicle)
 
-            # 按距离从近到远排序
-            dqn.vehicle_in_dqn_range_by_distance.sort(
-                key=lambda x: x.distance_to_bs, reverse=False
-            )
-            debug(
-                f"Vehicle in DQN {dqn.dqn_id} range by distance: {len(dqn.vehicle_in_dqn_range_by_distance)}"
-            )
+            dqn.vehicle_in_dqn_range_by_distance.sort(key=lambda x: x.distance_to_bs, reverse=False)
 
-            if (
-                    dqn.vehicle_exist_next and dqn.vehicle_exist_curr
-            ):
-                # 形成下个状态
+            if dqn.vehicle_exist_next and dqn.vehicle_exist_curr:
+                # 形成下一状态
                 iState = 0
-                for iVehicle in range(
-                        min(RL_N_STATES // 4, len(dqn.vehicle_in_dqn_range_by_distance))
-                ):
-                    dqn.next_state[iState] = dqn.vehicle_in_dqn_range_by_distance[
-                        iVehicle
-                    ].curr_loc[0]
-                    dqn.next_state[iState + 1] = dqn.vehicle_in_dqn_range_by_distance[
-                        iVehicle
-                    ].curr_loc[1]
-                    dqn.next_state[iState + 2] = dqn.vehicle_in_dqn_range_by_distance[
-                        iVehicle
-                    ].curr_dir[0]
-                    dqn.next_state[iState + 3] = dqn.vehicle_in_dqn_range_by_distance[
-                        iVehicle
-                    ].curr_dir[1]
+                for iVehicle in range(min(RL_N_STATES // 4, len(dqn.vehicle_in_dqn_range_by_distance))):
+                    dqn.next_state[iState] = dqn.vehicle_in_dqn_range_by_distance[iVehicle].curr_loc[0]
+                    dqn.next_state[iState + 1] = dqn.vehicle_in_dqn_range_by_distance[iVehicle].curr_loc[1]
+                    dqn.next_state[iState + 2] = dqn.vehicle_in_dqn_range_by_distance[iVehicle].curr_dir[0]
+                    dqn.next_state[iState + 3] = dqn.vehicle_in_dqn_range_by_distance[iVehicle].curr_dir[1]
                     iState += 4
-                debug(f"Next state of DQN {dqn.dqn_id}: {dqn.next_state}")
 
-                # === 新增：如果使用新模型，更新下一时刻CSI状态 ===
+                # CSI状态更新
                 if USE_UMI_NLOS_MODEL and hasattr(dqn, 'update_csi_states'):
                     dqn.update_csi_states(dqn.vehicle_in_dqn_range_by_distance, is_current=False)
-                    # 将CSI状态合并到下一状态中
-                    if hasattr(dqn, 'csi_states_next'):
-                        csi_start_idx = min(RL_N_STATES_BASE, len(dqn.next_state))
-                        csi_end_idx = csi_start_idx + min(RL_N_STATES_CSI, len(dqn.csi_states_next))
-                        for i, csi_val in enumerate(dqn.csi_states_next):
-                            if csi_start_idx + i < RL_N_STATES:
-                                dqn.next_state[csi_start_idx + i] = csi_val
 
-                # 计算目标Q值
-                dqn.q_target = dqn.reward + RL_GAMMA * torch.max(
-                    dqn(torch.tensor(dqn.next_state).float().to(device))
-                )
-                debug(
-                    f"DQN {dqn.dqn_id}: Target Q {dqn.q_target} with type {type(dqn.q_target)}"
-                )
+                # PER经验存储
+                if global_per_buffer is not None:
+                    action_index = RL_ACTION_SPACE.index(dqn.action) if dqn.action in RL_ACTION_SPACE else 0
+                    global_per_buffer.add(
+                        state=dqn.curr_state,
+                        action=action_index,
+                        reward=dqn.reward,
+                        next_state=dqn.next_state,
+                        done=False
+                    )
 
-                dqn.loss = torch.nn.MSELoss()(dqn.q_estimate, dqn.q_target)
-                debug(f"DQN {dqn.dqn_id}: Loss {dqn.loss}")
+                # PER增强训练
+                if global_per_buffer is not None and len(global_per_buffer) >= PER_BATCH_SIZE:
+                    enhanced_training_step(dqn, global_per_buffer, device)
+                else:
+                    # 传统训练（回退方案）
+                    traditional_training_step(dqn, device)
+
                 loss_list_per_epoch.append(dqn.loss.item())
                 dqn.loss_list.append(dqn.loss.item())
 
+                # ε-greedy策略调整
                 if FLAG_ADAPTIVE_EPSILON_ADJUSTMENT:
                     if dqn.loss < dqn.prev_loss:
-                        dqn.epsilon = min(
-                            RL_EPSILON_MAX, dqn.epsilon / RL_EPSILON_DECAY
-                        )
+                        dqn.epsilon = min(RL_EPSILON_MAX, dqn.epsilon / RL_EPSILON_DECAY)
                     elif dqn.loss > dqn.prev_loss:
-                        dqn.epsilon = max(
-                            RL_EPSILON_MIN, dqn.epsilon * RL_EPSILON_DECAY
-                        )
-                    else:
-                        dqn.epsilon = dqn.epsilon
-
+                        dqn.epsilon = max(RL_EPSILON_MIN, dqn.epsilon * RL_EPSILON_DECAY)
                     dqn.prev_loss = dqn.loss
 
-                # 反向传播
-                dqn.optimizer.zero_grad()
-                dqn.loss.backward()
-                dqn.optimizer.step()
+        # 计算平均指标
+        mean_delay, mean_snr_db = calculate_mean_metrics(global_dqn_list)
 
-        # 输出每轮的累积奖励和损失
-        debug_print(
-            f"Epoch {epoch}: Cumulative reward {cumulative_reward_per_epoch}, Loss {loss_list_per_epoch}"
+        if len(loss_list_per_epoch) > 0:
+            if FLAG_EMA_LOSS:
+                EMA_WEIGHT = 0.2
+                mean_loss = (np.min(loss_list_per_epoch) * EMA_WEIGHT +
+                             np.mean(loss_list_per_epoch) * EMA_WEIGHT * 0.1 +
+                             prev_mean_loss * (1 - EMA_WEIGHT) * 0.9)
+                prev_mean_loss = mean_loss
+            else:
+                mean_loss = np.mean(loss_list_per_epoch)
+
+        # 记录epoch信息
+        global_logger.log_epoch(
+            epoch=epoch,
+            cumulative_reward=cumulative_reward_per_epoch,
+            mean_loss=mean_loss,
+            mean_delay=mean_delay,
+            mean_snr=mean_snr_db,
+            vehicle_count=len(overall_vehicle_list)
         )
 
-        # === 添加指标检查 ===
-        debug(f"Epoch {epoch} completed:")
+        # 记录每个DQN的性能
         for dqn in global_dqn_list:
-            debug(f"DQN {dqn.dqn_id} - delays: {len(dqn.delay_list)}, SNRs: {len(dqn.snr_list)}")
-        # === 添加结束 ===
+            dqn_metrics = {
+                'loss': getattr(dqn, 'loss', 0),
+                'reward': getattr(dqn, 'reward', 0),
+                'epsilon': getattr(dqn, 'epsilon', RL_EPSILON),
+                'vehicle_count': len(getattr(dqn, 'vehicle_in_dqn_range_by_distance', [])),
+                'snr': getattr(dqn, 'prev_snr', 0),
+                'delay': getattr(dqn, 'prev_delay', 0)
+            }
+            global_logger.log_dqn_performance(dqn.dqn_id, dqn_metrics)
+
+        # 记录PER统计信息
+        if global_per_buffer is not None:
+            per_stats = global_per_buffer.get_statistics()
+            global_logger.logger.info(
+                f"PER Stats - Buffer: {per_stats['buffer_size']}, "
+                f"Avg Priority: {per_stats['avg_priority']:.4f}"
+            )
 
         # 参数同步
         if epoch % SYNC_FREQUENCY == 0:
             try:
-                # 计算全局平均参数
                 global_params = {}
                 for dqn in global_dqn_list:
                     for name, param in dqn.named_parameters():
@@ -351,100 +424,17 @@ def rl():
             except Exception as e:
                 debug(f"Parameter sync error: {e}")
 
+        # 收敛判断
+        if epoch == 1500:
+            global_logger.log_convergence(epoch, mean_loss)
+            debug_print(f"Converged at epoch {epoch} with loss {mean_loss}")
+            break
 
-        # 判断收敛条件
-        if len(loss_list_per_epoch) > 0:
-            if FLAG_EMA_LOSS:
-                EMA_WEIGHT = 0.2
-                mean_loss = (
-                        np.min(loss_list_per_epoch) * EMA_WEIGHT
-                        + np.mean(loss_list_per_epoch) * EMA_WEIGHT * 0.1
-                        + prev_mean_loss * (1 - EMA_WEIGHT) * 0.9
-                )
-                prev_mean_loss = mean_loss
-            else:
-                mean_loss = np.mean(loss_list_per_epoch)
-            mean_loss_across_epochs.append(mean_loss)
-
-            # === 修复：安全计算平均延迟和SNR ===
-            def calculate_mean_metrics(dqn_list):
-                """安全计算平均指标"""
-                delays = []
-                snrs = []
-
-                debug("=== Calculating Mean Metrics ===")
-
-                for dqn in dqn_list:
-                    dqn_id = getattr(dqn, 'dqn_id', 'unknown')
-
-                    # 延迟数据 - 更宽松的验证
-                    if hasattr(dqn, 'delay_list') and dqn.delay_list:
-                        debug(f"DQN {dqn_id} delay_list length: {len(dqn.delay_list)}")
-                        # 取所有有效延迟值
-                        valid_delays = [d for d in dqn.delay_list
-                                        if d is not None and not np.isnan(d) and d > 0]
-                        if valid_delays:
-                            # 使用最近的一些值而不是最后一个
-                            recent_delays = valid_delays[-min(5, len(valid_delays)):]
-                            delays.extend(recent_delays)
-                            debug(
-                                f"DQN {dqn_id} valid delays: {len(recent_delays)}, values: {[f'{d:.6f}' for d in recent_delays]}")
-                        else:
-                            debug(f"DQN {dqn_id} NO valid delays")
-
-                    # SNR数据 - 更宽松的验证
-                    if hasattr(dqn, 'snr_list') and dqn.snr_list:
-                        debug(f"DQN {dqn_id} snr_list length: {len(dqn.snr_list)}")
-                        valid_snrs = [s for s in dqn.snr_list
-                                      if s is not None and not np.isnan(s) and not np.isinf(s)]
-                        if valid_snrs:
-                            recent_snrs = valid_snrs[-min(5, len(valid_snrs)):]
-                            snrs.extend(recent_snrs)
-                            debug(
-                                f"DQN {dqn_id} valid SNRs: {len(recent_snrs)}, values: {[f'{s:.2f}' for s in recent_snrs]}")
-                        else:
-                            debug(f"DQN {dqn_id} NO valid SNRs")
-
-                # 计算平均值
-                mean_delay = np.mean(delays) if delays else 1.0  # 默认1.0秒
-                mean_snr_linear = np.mean(snrs) if snrs else 1.0  # 默认线性SNR=1
-
-                # 转换为dB，处理边界情况
-                if mean_snr_linear > 0:
-                    mean_snr_db = 10 * np.log10(mean_snr_linear)
-                else:
-                    mean_snr_db = -100  # 合理的最小值
-
-                debug(f"=== Mean Metrics Summary ===")
-                debug(f"Total delays collected: {len(delays)}")
-                debug(f"Total SNRs collected: {len(snrs)}")
-                debug(f"Final mean_delay: {mean_delay:.6f}")
-                debug(f"Final mean_snr_db: {mean_snr_db:.2f}dB")
-
-                return mean_delay, mean_snr_db
-
-            mean_delay, mean_snr_db = calculate_mean_metrics(global_dqn_list)
-            mean_delay_list.append(mean_delay)
-            mean_snr_list.append(mean_snr_db)
-
-            if epoch == 1500:
-                debug_print(
-                    f"Converged at epoch {epoch} with loss {mean_loss}: \n{mean_loss_across_epochs}"
-                )
-                debug_print(f"Mean delay: {mean_delay_list}")
-                debug_print(f"Mean SNR: {mean_snr_list}")
-
-                for dqn in global_dqn_list:
-                    debug_print(f"DQN {dqn.dqn_id} loss: \n{dqn.loss_list}")
-                    debug_print(
-                        f"DQN {dqn.dqn_id} vehicle count: {dqn.vehicle_count_list}"
-                    )
-                    debug_print(f"DQN {dqn.dqn_id} delay: {dqn.delay_list}")
-                    debug_print(f"DQN {dqn.dqn_id} SNR: {dqn.snr_list}")
-
-                break
-
+        # === 修复：在这里增加epoch计数 ===
         epoch += 1
+
+    # 训练结束后保存所有结果
+    global_logger.finalize()
 
 
 if __name__ == "__main__":
@@ -452,7 +442,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     debug_print(f"device is {device}")
 
-    # === 新增：显示当前使用的模型 ===
+    # 显示当前使用的模型
     if USE_UMI_NLOS_MODEL:
         debug_print("Using UMi NLOS Channel Model with NewRewardCalculator")
     else:

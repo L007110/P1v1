@@ -21,26 +21,31 @@ from Parameters import (
     ANTENNA_HEIGHT_BS,
 )
 from Classes import DQN, Vehicle
-from DebugPrint import *
+from logger import debug, debug_print
+from Parameters import USE_DUELING_DQN, RL_N_STATES, RL_N_HIDDEN, RL_N_ACTIONS
 
 
 def formulate_global_list_dqn(dqn_list, device):
     """
-    创建全局DQN列表 - 主要修改基站高度设置
+    创建全局DQN列表 - 支持双头DQN和传统DQN
     """
-    # 共10条道路, 每条道路对应一个DQN智能体
-    # === 修改：根据信道模型选择基站高度 ===
-    if USE_UMI_NLOS_MODEL:
-        base_station_height = ANTENNA_HEIGHT_BS  # 使用UMi模型的基站高度
-        debug("Topology: Using UMi NLOS model base station height")
-    else:
-        from Parameters import BASE_STATION_HEIGHT
-        base_station_height = BASE_STATION_HEIGHT  # 使用原模型高度
-        debug("Topology: Using original model base station height")
+    from Classes import DQN, DuelingDQN
 
-    # 创建DQN列表 - 保持原有结构不变
+    # 根据配置选择DQN类型
+    if USE_DUELING_DQN:
+        DQNClass = DuelingDQN
+        debug_print("Creating Dueling DQN instances with value-advantage architecture...")
+    else:
+        DQNClass = DQN
+        debug_print("Creating traditional DQN instances...")
+
+    # 清除现有列表
+    dqn_list.clear()
+
+    # 创建10个DQN实例 - 保持原有结构
+    # DQN 1: 水平道路，从左到右
     dqn_list.append(
-        DQN(
+        DQNClass(
             RL_N_STATES,
             RL_N_HIDDEN,
             RL_N_ACTIONS,
@@ -52,8 +57,9 @@ def formulate_global_list_dqn(dqn_list, device):
         ).to(device)
     )
 
+    # DQN 2: 垂直道路，从下到上
     dqn_list.append(
-        DQN(
+        DQNClass(
             RL_N_STATES,
             RL_N_HIDDEN,
             RL_N_ACTIONS,
@@ -65,8 +71,9 @@ def formulate_global_list_dqn(dqn_list, device):
         ).to(device)
     )
 
+    # DQN 3: 垂直道路，从上到下
     dqn_list.append(
-        DQN(
+        DQNClass(
             RL_N_STATES,
             RL_N_HIDDEN,
             RL_N_ACTIONS,
@@ -78,8 +85,9 @@ def formulate_global_list_dqn(dqn_list, device):
         ).to(device)
     )
 
+    # DQN 4: 垂直道路，从上到下
     dqn_list.append(
-        DQN(
+        DQNClass(
             RL_N_STATES,
             RL_N_HIDDEN,
             RL_N_ACTIONS,
@@ -91,8 +99,9 @@ def formulate_global_list_dqn(dqn_list, device):
         ).to(device)
     )
 
+    # DQN 5: 水平道路，从左到右
     dqn_list.append(
-        DQN(
+        DQNClass(
             RL_N_STATES,
             RL_N_HIDDEN,
             RL_N_ACTIONS,
@@ -104,8 +113,9 @@ def formulate_global_list_dqn(dqn_list, device):
         ).to(device)
     )
 
+    # DQN 6: 垂直道路，从下到上
     dqn_list.append(
-        DQN(
+        DQNClass(
             RL_N_STATES,
             RL_N_HIDDEN,
             RL_N_ACTIONS,
@@ -117,8 +127,9 @@ def formulate_global_list_dqn(dqn_list, device):
         ).to(device)
     )
 
+    # DQN 7: 水平道路，从左到右
     dqn_list.append(
-        DQN(
+        DQNClass(
             RL_N_STATES,
             RL_N_HIDDEN,
             RL_N_ACTIONS,
@@ -130,8 +141,9 @@ def formulate_global_list_dqn(dqn_list, device):
         ).to(device)
     )
 
+    # DQN 8: 垂直道路，从上到下
     dqn_list.append(
-        DQN(
+        DQNClass(
             RL_N_STATES,
             RL_N_HIDDEN,
             RL_N_ACTIONS,
@@ -143,8 +155,9 @@ def formulate_global_list_dqn(dqn_list, device):
         ).to(device)
     )
 
+    # DQN 9: 水平道路，从左到右
     dqn_list.append(
-        DQN(
+        DQNClass(
             RL_N_STATES,
             RL_N_HIDDEN,
             RL_N_ACTIONS,
@@ -156,8 +169,9 @@ def formulate_global_list_dqn(dqn_list, device):
         ).to(device)
     )
 
+    # DQN 10: 垂直道路，从上到下
     dqn_list.append(
-        DQN(
+        DQNClass(
             RL_N_STATES,
             RL_N_HIDDEN,
             RL_N_ACTIONS,
@@ -169,7 +183,15 @@ def formulate_global_list_dqn(dqn_list, device):
         ).to(device)
     )
 
-    debug(f"Created {len(dqn_list)} DQNs with base station height: {base_station_height}m")
+    debug_print(f"Successfully created {len(dqn_list)} {DQNClass.__name__} instances")
+
+    # 显示网络架构信息
+    if dqn_list:
+        sample_dqn = dqn_list[0]
+        debug_print(f"Network architecture: {type(sample_dqn).__name__}")
+        debug_print(f"Input dim: {RL_N_STATES}, Hidden dim: {RL_N_HIDDEN}, Output dim: {RL_N_ACTIONS}")
+        if USE_DUELING_DQN:
+            debug_print("Value-Advantage streams enabled")
 
 
 def vehicle_movement(vehicle_id, vehicle_list):

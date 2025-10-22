@@ -2,7 +2,7 @@
 import numpy as np
 import torch
 from collections import defaultdict
-from DebugPrint import *
+from logger import debug, debug_print
 from Parameters import *
 
 

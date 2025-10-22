@@ -2,7 +2,7 @@
 import torch
 import numpy as np
 import itertools
-from DebugPrint import *
+from logger import debug, debug_print
 
 # 全局列表
 global_dqn_list = []
@@ -85,7 +85,7 @@ def formulate_action_space():
 
 RL_ACTION_SPACE = formulate_action_space()
 RL_N_ACTIONS = len(RL_ACTION_SPACE)
-RL_N_HIDDEN = RL_N_ACTIONS * 2
+#RL_N_HIDDEN = RL_N_ACTIONS * 2
 
 # 基站和车辆参数
 BASE_STATION_HEIGHT = 10  # 更新为UMi模型中的10m
@@ -117,7 +117,7 @@ CROSS_POSITION_LIST = [
 VEHICLE_OCCUR_PROB = 0.2
 VEHICLE_SPEED_KMH = 60
 VEHICLE_SPEED_M3S = VEHICLE_SPEED_KMH * 1000 * 3 / 3600
-SYNC_FREQUENCY = 10
+#SYNC_FREQUENCY = 10
 
 # 添加缺失的通信参数
 GAIN_ANTENNA_T = 1.0  # 发射天线增益
@@ -136,7 +136,28 @@ TRANSMITTDE_POWER = 3  # 保持，但将在新模型中使用
 
 
 
-# 输出参数
+# ==================== 双头DQN和PER配置 ====================
+USE_DUELING_DQN = True  # 启用双头架构
+USE_PRIORITY_REPLAY = True  # 启用优先级经验回放
+
+# 双头DQN网络结构参数
+DUELING_HIDDEN_RATIO = 0.5  # 隐藏层比例
+if USE_DUELING_DQN:
+    RL_N_HIDDEN = RL_N_ACTIONS * 3  # 为双流提供更多容量
+else:
+    RL_N_HIDDEN = RL_N_ACTIONS * 2  # 原有配置
+
+# 优先级经验回放参数
+PER_CAPACITY = 10000  # 经验回放缓冲区容量
+PER_ALPHA = 0.6       # 优先级程度 (0=均匀, 1=完全优先级)
+PER_BETA = 0.4        # 重要性采样权重
+PER_BETA_INCREMENT = 0.001  # beta增量
+PER_BATCH_SIZE = 32   # 训练批次大小
+
+# 分布式PER参数
+SYNC_FREQUENCY = 100  # 经验同步频率
+
+# 更新参数打印函数
 def print_parameters():
     debug_print("######## 参数 begin ########")
     debug_print("=== 强化学习参数 ===")
@@ -144,23 +165,27 @@ def print_parameters():
     debug_print(f"RL_EPSILON: {RL_EPSILON}")
     debug_print(f"RL_GAMMA: {RL_GAMMA}")
 
+    debug_print("=== 架构增强参数 ===")
+    debug_print(f"USE_DUELING_DQN: {USE_DUELING_DQN}")
+    debug_print(f"USE_PRIORITY_REPLAY: {USE_PRIORITY_REPLAY}")
+    if USE_DUELING_DQN:
+        debug_print(f"DUELING_HIDDEN_RATIO: {DUELING_HIDDEN_RATIO}")
+    if USE_PRIORITY_REPLAY:
+        debug_print(f"PER_CAPACITY: {PER_CAPACITY}")
+        debug_print(f"PER_ALPHA: {PER_ALPHA}, PER_BETA: {PER_BETA}")
+
     debug_print("=== UMi NLOS 信道参数 ===")
     debug_print(f"CENTER_FREQUENCY: {CENTER_FREQUENCY / 1e9} GHz")
-    debug_print(f"ANTENNA_HEIGHT_BS: {ANTENNA_HEIGHT_BS} m")
-    debug_print(f"ANTENNA_HEIGHT_UE: {ANTENNA_HEIGHT_UE} m")
     debug_print(f"SYSTEM_BANDWIDTH: {SYSTEM_BANDWIDTH / 1e6} MHz")
-    debug_print(f"PATH_LOSS_MODEL: UMi NLOS (A={PATH_LOSS_A}, B={PATH_LOSS_B}, C={PATH_LOSS_C})")
-    debug_print(f"SHADOWING_STD: {SHADOWING_STD} dB")
 
     debug_print("=== 场景参数 ===")
     debug_print(f"SCENE_SCALE_X: {SCENE_SCALE_X}")
     debug_print(f"SCENE_SCALE_Y: {SCENE_SCALE_Y}")
     debug_print(f"RL_N_STATES: {RL_N_STATES} (Base: {RL_N_STATES_BASE} + CSI: {RL_N_STATES_CSI})")
     debug_print(f"RL_N_ACTIONS: {RL_N_ACTIONS}")
+    debug_print(f"RL_N_HIDDEN: {RL_N_HIDDEN}")
 
     debug_print("=== GNN增强参数 ===")
     debug_print(f"USE_GNN_ENHANCEMENT: {USE_GNN_ENHANCEMENT}")
-    debug_print(f"GNN_OUTPUT_DIM: {GNN_OUTPUT_DIM}")
-    debug_print(f"ATTENTION_HEADS: {ATTENTION_HEADS}")
 
     debug_print("######## 参数 end ########")
